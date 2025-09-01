@@ -1,7 +1,7 @@
 # Rust
 /target/
 
-# Local cargo cache (keep only config)
+# Local cargo caches (keep only config)
 /.cargo/*
 !/.cargo/config
 !/.cargo/config.toml
