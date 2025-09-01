@@ -1,7 +1,7 @@
 # Rust
 /target/
 
-# Local cargo caches (keep only config)
+# Local cargo cache (keep only config)
 /.cargo/*
 !/.cargo/config
 !/.cargo/config.toml
@@ -9,3 +9,6 @@
 
 # IDE
 /.vscode/
+
+# Misc
+*.rs.bk
