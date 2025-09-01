@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ""
+      CARGO_ENCODED_RUSTFLAGS: ""
+      RUSTDOCFLAGS: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        features: ["", "hd", "backup", "hd backup"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --features "${{ matrix.features }}" -- -D warnings
+      - run: cargo test --all-targets --features "${{ matrix.features }}"
+
+  udeps:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+      CARGO_ENCODED_RUSTFLAGS: ""
+      RUSTDOCFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-udeps --locked
+      - run: cargo +nightly udeps --all-targets --all-features

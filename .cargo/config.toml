@@ -1,0 +1,6 @@
+[build]
+rustflags = [
+  "--check-cfg=cfg(unix)",
+  "--check-cfg=cfg(windows)",
+  "--check-cfg=cfg(feature, values(\"argon2\",\"backup\",\"default\",\"hd\",\"sysinfo\",\"sysinfo_params\",\"memlock\",\"timing_harden\",\"test_kdf_fast\",\"win_harden\",\"win_dacl\",\"adaptive_pbkdf2\"))",
+]

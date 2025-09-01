@@ -1,0 +1,11 @@
+# Rust
+/target/
+
+# Local cargo cache (keep only config)
+/.cargo/*
+!/.cargo/config
+!/.cargo/config.toml
+/.cargo/advisory-db/
+
+# IDE
+/.vscode/
