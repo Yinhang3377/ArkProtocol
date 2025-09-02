@@ -1,10 +1,15 @@
+#[cfg(feature = "backup")]
 use assert_cmd::prelude::*;
+#[cfg(feature = "backup")]
 use serde_json::Value;
-use std::{ fs, process::Command, thread, time::Duration };
 use std::path::PathBuf;
+#[cfg(feature = "backup")]
+use std::{fs, process::Command, thread, time::Duration};
+#[cfg(feature = "backup")]
+use uuid::Uuid;
 
-// 若该工具函数未被使用，避免警告（或直接删除该函数）
-#[allow(dead_code)]
+// 仅在 backup 特性下编译，避免未使用警告
+#[cfg(feature = "backup")]
 fn tmp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("arkproto_test_{}_{}", name, Uuid::new_v4()))
 }
@@ -50,7 +55,10 @@ fn save_and_load_encrypted_roundtrip_json() {
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let v: Value = serde_json::from_str(&out).expect("valid JSON");
     assert!(v.get("address").is_some(), "json must contain 'address'");
-    assert!(v.get("public_key").is_some(), "json must contain 'public_key'");
+    assert!(
+        v.get("public_key").is_some(),
+        "json must contain 'public_key'"
+    );
 
     // 清理
     let _ = fs::remove_dir_all(&dir);
@@ -67,7 +75,13 @@ fn backup_create_and_cleanup_keeps_last_two() {
     // 先保存一个加密钱包
     Command::cargo_bin("ark_protocol")
         .unwrap()
-        .args(["save-encrypted", "--file", &file_str, "--password", "a_very_strong_password"])
+        .args([
+            "save-encrypted",
+            "--file",
+            &file_str,
+            "--password",
+            "a_very_strong_password",
+        ])
         .assert()
         .success();
 
@@ -101,10 +115,7 @@ fn backup_create_and_cleanup_keeps_last_two() {
     // 校验 JSON 返回 removed 数量
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let v: Value = serde_json::from_str(&out).expect("valid JSON");
-    let removed = v
-        .get("removed")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0);
+    let removed = v.get("removed").and_then(|x| x.as_u64()).unwrap_or(0);
     assert!(removed >= 1, "should remove at least one old backup");
 
     // 校验目录中只剩 2 个备份文件
