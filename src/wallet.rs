@@ -181,7 +181,9 @@ impl LockedBufGuard {
     /// 创建一个新的 LockedBufGuard，并立即对传入的内存 slice 加锁。
     /// 如果加锁失败，返回错误；否则返回管理该内存的 guard。
     fn new(slice: &mut [u8]) -> std::io::Result<Self> {
-        memlock::lock(slice)?; // 尝试加锁
+        // 调用 memlock::lock 前加条件编译
+        #[cfg(any(unix, windows))]
+        memlock::lock(slice)?;
         Ok(Self {
             ptr: slice.as_mut_ptr(),
             len: slice.len(),
@@ -197,6 +199,8 @@ impl Drop for LockedBufGuard {
             unsafe {
                 // 重新构造出原始 slice，调用 memlock::unlock 解除内存锁定
                 let s = std::slice::from_raw_parts_mut(self.ptr, self.len);
+                // 调用 memlock::unlock 前加条件编译
+                #[cfg(any(unix, windows))]
                 let _ = memlock::unlock(s);
             }
         }

@@ -31,6 +31,7 @@ thiserror = "1"
 hex = "0.4"
 bs58 = "0.5"
 ripemd = "0.1"
+libc = "0.2"
 
 # 可选依赖
 bip39   = { version = "2.2", optional = true }
