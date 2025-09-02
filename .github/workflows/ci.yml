@@ -1,36 +1,67 @@
-name: CI
+name: Rust CI
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    runs-on: ${{ matrix.os }}
-    env:
-      RUSTFLAGS: ""
-      CARGO_ENCODED_RUSTFLAGS: ""
-      RUSTDOCFLAGS: ""
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-        features: ["", "hd", "backup", "hd backup"]
+  fmt_clippy:
+    name: fmt + clippy (all features)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets --features "${{ matrix.features }}" -- -D warnings
-      - run: cargo test --all-targets --features "${{ matrix.features }}"
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustc/cargo version
+        run: |
+          rustc -Vv
+          cargo -V
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: tests on ${{ matrix.os }} [features='${{ matrix.features }}']
+    needs: fmt_clippy
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        features: ["", "backup", "hd", "hd backup"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --workspace --all-targets --verbose
+      - name: Test (no extra features)
+        if: matrix.features == ''
+        run: cargo test --workspace --all-targets --no-fail-fast --verbose
+      - name: Test (with '${{ matrix.features }}')
+        if: matrix.features != ''
+        run: cargo test --workspace --all-targets --no-fail-fast --features "${{ matrix.features }}" --verbose
 
   udeps:
+    name: cargo-udeps (unused deps)
+    needs: test
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: ""
-      CARGO_ENCODED_RUSTFLAGS: ""
-      RUSTDOCFLAGS: ""
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo install cargo-udeps --locked
-      - run: cargo +nightly udeps --all-targets --all-features
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-udeps
+        run: cargo install cargo-udeps --locked
+      - name: Check unused dependencies
+        run: cargo +nightly udeps --all-targets --all-features
