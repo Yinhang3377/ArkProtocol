@@ -1,3 +1,7 @@
+use assert_cmd::prelude::*;
+use predicates::str::contains;
+use std::process::Command;
+
 #[test]
 #[cfg(feature = "backup")]
 fn save_encrypted_without_password_should_fail() {
@@ -18,25 +22,13 @@ fn load_encrypted_with_wrong_password_should_fail() {
 
     Command::cargo_bin("ark_protocol")
         .unwrap()
-        .args([
-            "save-encrypted",
-            "--file",
-            &p_str,
-            "--password",
-            "CorrectPwd_123!",
-        ])
+        .args(["save-encrypted", "--file", &p_str, "--password", "CorrectPwd_123!"])
         .assert()
         .success();
 
     Command::cargo_bin("ark_protocol")
         .unwrap()
-        .args([
-            "load-encrypted",
-            "--file",
-            &p_str,
-            "--password",
-            "WrongPwd_123!",
-        ])
+        .args(["load-encrypted", "--file", &p_str, "--password", "WrongPwd_123!"])
         .assert()
         .failure()
         .stderr(contains("E_AUTH"));
