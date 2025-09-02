@@ -20,6 +20,8 @@
 use crate::crypto::{public_key_to_address, sign_message_sha256, verify_message_sha256};
 use crate::errors::WalletError;
 use anyhow::{anyhow, Context, Result};
+#[cfg(unix)]
+use libc;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use sha2::Sha256;
 use std::fmt;
