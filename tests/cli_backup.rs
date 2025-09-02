@@ -1,6 +1,4 @@
-use assert_cmd::prelude::*;
-use serde_json::Value;
-use std::{fs, path::PathBuf, process::Command, thread, time::Duration};
+use std::path::PathBuf;
 use uuid::Uuid;
 
 fn tmp_path(name: &str) -> PathBuf {

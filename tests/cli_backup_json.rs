@@ -15,7 +15,13 @@ fn backup_and_cleanup_emit_valid_json() {
     // 先保存
     Command::cargo_bin("ark_protocol")
         .unwrap()
-        .args(["save-encrypted", "--file", &file_str, "--password", "StrongPwd_123!"])
+        .args([
+            "save-encrypted",
+            "--file",
+            &file_str,
+            "--password",
+            "StrongPwd_123!",
+        ])
         .assert()
         .success();
 
@@ -50,10 +56,7 @@ fn backup_and_cleanup_emit_valid_json() {
         .success();
     let out2 = String::from_utf8(assert2.get_output().stdout.clone()).unwrap();
     let v2: Value = serde_json::from_str(&out2).expect("valid json");
-    let removed = v2
-        .get("removed")
-        .and_then(|x| x.as_u64())
-        .expect("removed");
+    let removed = v2.get("removed").and_then(|x| x.as_u64()).expect("removed");
     // 只创建了一个备份，keep-last=1 时应该不删除
     assert_eq!(removed, 0);
 

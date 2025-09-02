@@ -17,46 +17,42 @@
 //! - salt_hex: 16 字节盐（hex 字符串，非全零）。
 //! - nonce_hex: 12 字节随机数（hex 字符串，非全零，AES-GCM Nonce）。
 //! - ciphertext_hex: AES-256-GCM 的密文（hex；AAD 绑定 magic/version/kdf/iterations）。
-use crate::crypto::{ public_key_to_address, sign_message_sha256, verify_message_sha256 };
+use crate::crypto::{public_key_to_address, sign_message_sha256, verify_message_sha256};
 use crate::errors::WalletError;
-use anyhow::{ anyhow, Context, Result };
-use secp256k1::{ PublicKey, Secp256k1, SecretKey };
+use anyhow::{anyhow, Context, Result};
+use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use sha2::Sha256;
 use std::fmt;
-use std::fs::{ self, File, OpenOptions };
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
-use std::io::{ BufReader, Read };
-use std::path::{ Path, PathBuf };
+use std::io::{BufReader, Read};
+use std::path::{Path, PathBuf};
 #[cfg(feature = "hd")]
 use std::str::FromStr;
-use std::time::{ SystemTime, UNIX_EPOCH };
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use aes_gcm::{ aead::{ generic_array::GenericArray, Aead, Payload }, Aes256Gcm, KeyInit };
+use aes_gcm::{
+    aead::{generic_array::GenericArray, Aead, Payload},
+    Aes256Gcm, KeyInit,
+};
 use pbkdf2::pbkdf2_hmac;
-use rand::{ rngs::OsRng, RngCore };
-use serde::{ Deserialize, Serialize };
-use zeroize::{ Zeroize, Zeroizing };
+use rand::{rngs::OsRng, RngCore};
+use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(feature = "argon2")]
-use argon2::{ Algorithm, Argon2, Params, Version };
+use argon2::{Algorithm, Argon2, Params, Version};
 
 #[cfg(windows)]
-use std::{ ffi::OsStr, os::windows::ffi::OsStrExt };
+use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
 #[cfg(windows)]
 use windows::core::PCWSTR;
 #[cfg(windows)]
 use windows::Win32::Storage::FileSystem::{
-    GetFileAttributesW,
-    MoveFileExW,
-    ReplaceFileW,
-    SetFileAttributesW,
-    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
-    FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAGS_AND_ATTRIBUTES,
-    INVALID_FILE_ATTRIBUTES,
-    MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH,
+    GetFileAttributesW, MoveFileExW, ReplaceFileW, SetFileAttributesW,
+    FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAGS_AND_ATTRIBUTES,
+    INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     REPLACEFILE_WRITE_THROUGH,
 };
 
@@ -151,17 +147,15 @@ mod memlock {
     #[cfg(windows)]
     pub fn lock(buf: &mut [u8]) -> std::io::Result<()> {
         use windows::Win32::System::Memory::VirtualLock;
-        (unsafe { VirtualLock(buf.as_mut_ptr() as _, buf.len()) }).map_err(|e|
-            std::io::Error::other(e.to_string())
-        )
+        (unsafe { VirtualLock(buf.as_mut_ptr() as _, buf.len()) })
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     #[cfg(windows)]
     pub fn unlock(buf: &mut [u8]) -> std::io::Result<()> {
         use windows::Win32::System::Memory::VirtualUnlock;
-        (unsafe { VirtualUnlock(buf.as_mut_ptr() as _, buf.len()) }).map_err(|e|
-            std::io::Error::other(e.to_string())
-        )
+        (unsafe { VirtualUnlock(buf.as_mut_ptr() as _, buf.len()) })
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     // 其它平台（非 Unix/Windows），lock/unlock 为空实现，保证跨平台兼容
@@ -179,7 +173,7 @@ mod memlock {
 #[cfg(feature = "memlock")]
 struct LockedBufGuard {
     ptr: *mut u8, // 指向被加锁内存的原始指针
-    len: usize, // 被加锁内存的长度
+    len: usize,   // 被加锁内存的长度
 }
 
 #[cfg(feature = "memlock")]
@@ -219,15 +213,18 @@ const ARGON2_DEFAULT_PARALLELISM: u32 = 1;
 /// 钱包结构体，包含私钥、公钥和地址
 pub struct Wallet {
     pub(crate) secret_key: SecretKey, // 私钥，仅 crate 内部可见，保护安全
-    pub public_key: PublicKey, // 公钥，可公开
-    pub address: String, // 钱包地址，由公钥推导
+    pub public_key: PublicKey,        // 公钥，可公开
+    pub address: String,              // 钱包地址，由公钥推导
 }
 
 impl fmt::Debug for Wallet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // 将公钥序列化为压缩格式（33字节），取前4字节做简短展示
         let comp = self.public_key.serialize();
-        let pk_short = format!("{:02x}{:02x}{:02x}{:02x}..", comp[0], comp[1], comp[2], comp[3]);
+        let pk_short = format!(
+            "{:02x}{:02x}{:02x}{:02x}..",
+            comp[0], comp[1], comp[2], comp[3]
+        );
         // 只显示地址和公钥前缀，避免泄露私钥和完整公钥
         f.debug_struct("Wallet")
             .field("address", &self.address)
@@ -244,9 +241,10 @@ enum KdfKind {
         iterations: u32, // 迭代次数，越大越安全但越慢
     },
     // Argon2id 算法（可选 feature），包含多项参数
-    #[cfg(feature = "argon2")] Argon2id {
-        t_cost: u32, // 迭代次数（time cost）
-        m_cost_kib: u32, // 内存消耗（单位 KiB）
+    #[cfg(feature = "argon2")]
+    Argon2id {
+        t_cost: u32,      // 迭代次数（time cost）
+        m_cost_kib: u32,  // 内存消耗（单位 KiB）
         parallelism: u32, // 并行度（线程数）
     },
 }
@@ -259,8 +257,11 @@ impl KdfKind {
             KdfKind::Pbkdf2 { .. } => "PBKDF2-SHA256".to_string(),
             // Argon2id 算法，带参数的标签
             #[cfg(feature = "argon2")]
-            KdfKind::Argon2id { m_cost_kib, parallelism, .. } =>
-                format!("Argon2id-v1:m={m_cost_kib},p={parallelism}"),
+            KdfKind::Argon2id {
+                m_cost_kib,
+                parallelism,
+                ..
+            } => format!("Argon2id-v1:m={m_cost_kib},p={parallelism}"),
         }
     }
 }
@@ -298,7 +299,7 @@ impl Wallet {
         let secret_key = loop {
             let mut buf = [0u8; 32]; // 创建一个32字节的缓冲区
             OsRng.fill_bytes(&mut buf); // 用操作系统安全随机数填充缓冲区
-            // 尝试用 buf 创建私钥，如果合法就返回
+                                        // 尝试用 buf 创建私钥，如果合法就返回
             if let Ok(sk) = SecretKey::from_slice(&buf) {
                 buf.zeroize(); // 用完后立即清除缓冲区，防止泄露
                 break sk; // 跳出循环，得到合法私钥
@@ -336,7 +337,7 @@ impl Wallet {
     pub fn verify_sha256(
         &self,
         msg: &[u8],
-        sig: &secp256k1::ecdsa::Signature
+        sig: &secp256k1::ecdsa::Signature,
     ) -> anyhow::Result<bool> {
         // 注意参数顺序：公钥、签名、消息
         verify_message_sha256(&self.public_key, sig, msg)
@@ -378,8 +379,8 @@ impl Wallet {
     pub fn save_encrypted_argon2<P: AsRef<Path>>(&self, path: P, password: &[u8]) -> Result<()> {
         // 构造 Argon2id KDF 配置，使用默认参数（迭代次数、内存消耗、并行度）
         let kdf = KdfKind::Argon2id {
-            t_cost: ARGON2_DEFAULT_T_COST, // 迭代次数
-            m_cost_kib: ARGON2_DEFAULT_M_COST_KIB, // 内存消耗（KiB）
+            t_cost: ARGON2_DEFAULT_T_COST,           // 迭代次数
+            m_cost_kib: ARGON2_DEFAULT_M_COST_KIB,   // 内存消耗（KiB）
             parallelism: ARGON2_DEFAULT_PARALLELISM, // 并行度
         };
         // 调用通用加密保存函数，执行实际的加密和写入流程
@@ -400,7 +401,7 @@ impl Wallet {
         password: &[u8],
         t_cost: u32,
         m_cost_kib: u32,
-        parallelism: u32
+        parallelism: u32,
     ) -> Result<()> {
         // 构造带自定义参数的 Argon2id KDF 配置
         let kdf = KdfKind::Argon2id {
@@ -430,7 +431,7 @@ impl Wallet {
         &self,
         path: P,
         password: &[u8],
-        kdf: KdfKind
+        kdf: KdfKind,
     ) -> Result<()> {
         // 检查密码是否为空
         if password.is_empty() {
@@ -467,7 +468,12 @@ impl Wallet {
             KdfKind::Argon2id { t_cost, .. } => t_cost,
         };
         // 生成AES-GCM的AAD（附加认证数据），绑定文件版本、算法、迭代次数和magic
-        let aad = make_aad(WALLET_VERSION, &kdf_label, iterations_for_store, WALLET_MAGIC);
+        let aad = make_aad(
+            WALLET_VERSION,
+            &kdf_label,
+            iterations_for_store,
+            WALLET_MAGIC,
+        );
 
         let result = (|| -> Result<()> {
             // 用派生密钥初始化AES-256-GCM加密器
@@ -476,30 +482,32 @@ impl Wallet {
             let plaintext = Zeroizing::new(self.secret_key.secret_bytes().to_vec());
             // 执行AES-GCM加密，得到密文
             let ciphertext = cipher
-                .encrypt(GenericArray::from_slice(&nonce), Payload {
-                    msg: &plaintext,
-                    aad: &aad,
-                })
+                .encrypt(
+                    GenericArray::from_slice(&nonce),
+                    Payload {
+                        msg: &plaintext,
+                        aad: &aad,
+                    },
+                )
                 .map_err(|_| anyhow!("AES-GCM encrypt failed"))?;
 
             // 构造加密钱包文件结构体，准备序列化为JSON
             let enc = EncryptedWallet {
                 magic: Some(WALLET_MAGIC.into()), // 魔法字串，标识这是Ark钱包文件
-                version: WALLET_VERSION, // 钱包文件版本号
-                kdf: kdf_label, // 加密算法标签（比如PBKDF2-SHA256）
+                version: WALLET_VERSION,          // 钱包文件版本号
+                kdf: kdf_label,                   // 加密算法标签（比如PBKDF2-SHA256）
                 iterations: iterations_for_store, // 迭代次数（加密算法参数）
-                salt_hex: hex::encode(salt), // 盐（16字节，转成16进制字符串）
-                nonce_hex: hex::encode(nonce), // 随机数（12字节，转成16进制字符串）
+                salt_hex: hex::encode(salt),      // 盐（16字节，转成16进制字符串）
+                nonce_hex: hex::encode(nonce),    // 随机数（12字节，转成16进制字符串）
                 ciphertext_hex: hex::encode(ciphertext), // 密文（加密后的私钥，转成16进制字符串）
             };
             // 根据编译模式选择是否美化JSON
-            let json_bytes = (
-                if cfg!(debug_assertions) {
-                    serde_json::to_vec_pretty(&enc)
-                } else {
-                    serde_json::to_vec(&enc)
-                }
-            ).context("serialize encrypted wallet")?;
+            let json_bytes = (if cfg!(debug_assertions) {
+                serde_json::to_vec_pretty(&enc)
+            } else {
+                serde_json::to_vec(&enc)
+            })
+            .context("serialize encrypted wallet")?;
             // 用Zeroizing包装JSON数据，防止内存残留
             let data = Zeroizing::new(json_bytes);
             // 原子方式写入到目标文件，确保写入安全
@@ -536,9 +544,8 @@ impl Wallet {
         // 读取钱包文件内容（安全读取，防止大文件攻击）
         let data = read_wallet_file_secure(path.as_ref())?;
         // 反序列化 JSON，解析为 EncryptedWallet 结构体
-        let enc: EncryptedWallet = serde_json
-            ::from_slice(&data)
-            .context("parse encrypted wallet json")?;
+        let enc: EncryptedWallet =
+            serde_json::from_slice(&data).context("parse encrypted wallet json")?;
 
         // v2 及以上版本：校验 magic 字段，防止伪造钱包文件
         if enc.version >= 2 && enc.magic.as_deref() != Some(WALLET_MAGIC) {
@@ -596,12 +603,13 @@ impl Wallet {
         let allow_fallback = enc.version == 1;
 
         // 尝试用 AAD 解密密文，得到私钥明文
-        let plaintext = match
-            cipher.decrypt(GenericArray::from_slice(&nonce), Payload {
+        let plaintext = match cipher.decrypt(
+            GenericArray::from_slice(&nonce),
+            Payload {
                 msg: ciphertext.as_ref(), // 要解密的数据（密文）
-                aad: &aad, // 附加认证数据（绑定了magic/version/kdf/iterations）
-            })
-        {
+                aad: &aad,                // 附加认证数据（绑定了magic/version/kdf/iterations）
+            },
+        ) {
             // 解密成功，包装为 Zeroizing，自动清理内存
             Ok(p) => Zeroizing::new(p),
             // v1 兼容模式下，尝试无 AAD 解密
@@ -682,7 +690,7 @@ impl Wallet {
     pub fn change_password<P: AsRef<Path>>(
         path: P,
         old_password: &[u8],
-        new_password: &[u8]
+        new_password: &[u8],
     ) -> Result<()> {
         // 检查旧密码和新密码是否为空
         if old_password.is_empty() || new_password.is_empty() {
@@ -706,7 +714,7 @@ impl Wallet {
     pub fn upgrade_to_argon2_in_place<P: AsRef<Path>>(
         &self,
         path: P,
-        password: &[u8]
+        password: &[u8],
     ) -> Result<()> {
         // 用 Argon2id 算法和当前密码重新加密钱包，覆盖原文件
         self.save_encrypted_argon2(path, password)
@@ -717,7 +725,7 @@ impl Wallet {
     pub fn change_password_to_argon2<P: AsRef<Path>>(
         path: P,
         old_password: &[u8],
-        new_password: &[u8]
+        new_password: &[u8],
     ) -> Result<()> {
         // 检查旧密码和新密码是否为空
         if old_password.is_empty() || new_password.is_empty() {
@@ -742,13 +750,16 @@ impl Wallet {
     pub fn cleanup_stale_wallet_temps<P: AsRef<Path>>(
         dir: P,
         base: &str,
-        max_age_secs: u64
+        max_age_secs: u64,
     ) -> Result<usize> {
         // 校验基础文件名是否合法，防止路径注入等安全风险
         validate_base_name(base)?;
         let dir = dir.as_ref();
         // 获取当前系统时间（秒）
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let mut removed = 0usize;
         // 遍历目录下所有文件
         for entry in fs::read_dir(dir).with_context(|| format!("read_dir {dir:?}"))? {
@@ -805,8 +816,7 @@ impl Wallet {
         validate_base_name(base)?;
         let dir = dir.as_ref();
         // 收集所有以 "{base}.bak." 开头的备份文件
-        let mut entries: Vec<_> = fs
-            ::read_dir(dir)
+        let mut entries: Vec<_> = fs::read_dir(dir)
             .with_context(|| format!("read_dir {dir:?}"))?
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -816,14 +826,8 @@ impl Wallet {
             .collect();
         // 按文件修改时间从新到旧排序
         entries.sort_by(|a, b| {
-            let am = a
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok();
-            let bm = b
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok();
+            let am = a.metadata().and_then(|m| m.modified()).ok();
+            let bm = b.metadata().and_then(|m| m.modified()).ok();
             bm.cmp(&am)
         });
         let mut removed = 0usize;
@@ -855,7 +859,7 @@ impl Wallet {
         let t0 = Instant::now();
         pbkdf2_hmac::<Sha256>(pw, &salt, warm_iters, &mut key);
         let elapsed = t0.elapsed().as_millis().max(1) as u64; // 防止除零
-        // 计算每次迭代大约耗时多少纳秒
+                                                              // 计算每次迭代大约耗时多少纳秒
         let per_iter_ns = (elapsed * 1_000_000) / (warm_iters as u64);
 
         // 根据目标耗时（毫秒）推算需要多少次迭代
@@ -946,7 +950,10 @@ pub fn create_encrypted_backup<P: AsRef<Path>>(target: P) -> Result<PathBuf> {
         .and_then(|s| s.to_str())
         .unwrap_or("wallet.json");
     // 使用毫秒级时间戳，避免同一秒内多个备份被覆盖
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     let backup = dir.join(format!("{base}.bak.{ts}"));
     write_file_atomically(&backup, &data)?;
     Ok(backup)
@@ -962,8 +969,7 @@ pub fn cleanup_backups<P: AsRef<Path>>(dir: P, base: &str, keep: usize) -> Resul
     validate_base_name(base)?;
     let dir = dir.as_ref();
     // 收集所有以 "{base}.bak." 开头的备份文件
-    let mut entries: Vec<_> = fs
-        ::read_dir(dir)
+    let mut entries: Vec<_> = fs::read_dir(dir)
         .with_context(|| format!("read_dir {dir:?}"))?
         .filter_map(|e| e.ok())
         .filter(|e| {
@@ -973,14 +979,8 @@ pub fn cleanup_backups<P: AsRef<Path>>(dir: P, base: &str, keep: usize) -> Resul
         .collect();
     // 按文件修改时间从新到旧排序
     entries.sort_by(|a, b| {
-        let am = a
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok();
-        let bm = b
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok();
+        let am = a.metadata().and_then(|m| m.modified()).ok();
+        let bm = b.metadata().and_then(|m| m.modified()).ok();
         bm.cmp(&am)
     });
     let mut removed = 0usize;
@@ -1050,17 +1050,21 @@ fn write_file_atomically(target: &Path, data: &[u8]) -> Result<()> {
 /// - 实现：sleep 随机时长后，再自旋补足总时长，保证延迟精度。
 fn uniform_delay_on_auth_failure() {
     use std::thread::sleep;
-    use std::time::{ Duration, Instant };
+    use std::time::{Duration, Instant};
     const MIN_MS: u64 = 40;
     const MAX_MS: u64 = 120;
     let span = MAX_MS.saturating_sub(MIN_MS);
     let mut rng = OsRng;
     // 生成 [0, span] 范围内的随机抖动
-    let jitter = if span > 0 { (rng.next_u32() as u64) % (span + 1) } else { 0 };
+    let jitter = if span > 0 {
+        (rng.next_u32() as u64) % (span + 1)
+    } else {
+        0
+    };
     let total = Duration::from_millis(MIN_MS + jitter);
     let start = Instant::now();
     sleep(total); // 线程休眠
-    // 精确补足剩余时间，防止 sleep 不足
+                  // 精确补足剩余时间，防止 sleep 不足
     while start.elapsed() < total {
         std::hint::spin_loop();
     }
@@ -1160,18 +1164,26 @@ fn final_pre_replace_check(target: &Path) -> Result<()> {
 /// 优先使用 ReplaceFileW（原子替换），失败则降级为 MoveFileExW。
 fn atomic_replace_with_retry(src: &Path, dst: &Path) -> Result<()> {
     // 将源文件和目标文件路径转换为以 0 结尾的 UTF-16 编码（Windows API 需要）
-    let src_w: Vec<u16> = src.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let dst_w: Vec<u16> = dst.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let src_w: Vec<u16> = src
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let dst_w: Vec<u16> = dst
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
     // 优先尝试使用 ReplaceFileW 进行原子替换（Windows 原生 API，推荐方式）
     let rep_res = unsafe {
         ReplaceFileW(
-            PCWSTR(dst_w.as_ptr()), // 目标文件路径
-            PCWSTR(src_w.as_ptr()), // 源（临时）文件路径
-            PCWSTR::null(), // 备份文件路径（不需要）
+            PCWSTR(dst_w.as_ptr()),    // 目标文件路径
+            PCWSTR(src_w.as_ptr()),    // 源（临时）文件路径
+            PCWSTR::null(),            // 备份文件路径（不需要）
             REPLACEFILE_WRITE_THROUGH, // 写入后立即落盘
             None,
-            None
+            None,
         )
     };
     // 如果 ReplaceFileW 成功，直接返回 Ok
@@ -1182,9 +1194,9 @@ fn atomic_replace_with_retry(src: &Path, dst: &Path) -> Result<()> {
     // 如果 ReplaceFileW 失败，降级为 MoveFileExW（带覆盖和写穿透标志）
     let mv_res = unsafe {
         MoveFileExW(
-            PCWSTR(src_w.as_ptr()), // 源（临时）文件路径
-            PCWSTR(dst_w.as_ptr()), // 目标文件路径
-            MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING // 覆盖并写穿透
+            PCWSTR(src_w.as_ptr()),                             // 源（临时）文件路径
+            PCWSTR(dst_w.as_ptr()),                             // 目标文件路径
+            MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING, // 覆盖并写穿透
         )
     };
     // 如果 MoveFileExW 成功，直接返回 Ok
@@ -1276,7 +1288,9 @@ fn read_wallet_file_secure(path: &Path) -> Result<Vec<u8>> {
     // 读取文件内容到缓冲区
     let mut reader = BufReader::new(file);
     let mut buf = Vec::with_capacity((meta.len() as usize).min(MAX_WALLET_FILE_SIZE as usize));
-    reader.read_to_end(&mut buf).context("read encrypted wallet file")?;
+    reader
+        .read_to_end(&mut buf)
+        .context("read encrypted wallet file")?;
     Ok(buf)
 }
 
@@ -1301,7 +1315,9 @@ fn read_wallet_file_secure(path: &Path) -> Result<Vec<u8>> {
     let mut reader = std::io::BufReader::new(file);
     let mut buf = Vec::with_capacity((meta.len() as usize).min(MAX_WALLET_FILE_SIZE as usize));
     use std::io::Read;
-    reader.read_to_end(&mut buf).context("read encrypted wallet file")?;
+    reader
+        .read_to_end(&mut buf)
+        .context("read encrypted wallet file")?;
     // 返回文件内容（字节数组）
     Ok(buf)
 }
@@ -1310,7 +1326,11 @@ fn read_wallet_file_secure(path: &Path) -> Result<Vec<u8>> {
 #[cfg(windows)]
 fn windows_has_reparse_point(path: &Path) -> bool {
     // 将路径转换为以 0 结尾的 UTF-16 编码（Windows API 需要）
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         // 调用 Windows API 获取文件属性
         let attrs = GetFileAttributesW(PCWSTR(wide.as_ptr()));
@@ -1368,7 +1388,7 @@ fn derive_key_into(
     kdf: KdfKind,
     password: &[u8],
     salt: &[u8],
-    out_key: &mut [u8; 32]
+    out_key: &mut [u8; 32],
 ) -> Result<()> {
     match kdf {
         // 如果是 PBKDF2 算法
@@ -1376,14 +1396,12 @@ fn derive_key_into(
             let min_iters = TEST_MIN_PBKDF2;
             // 检查迭代次数是否在允许范围内
             if !(min_iters..=MAX_PBKDF2_ITERATIONS).contains(&iterations) {
-                return Err(
-                    anyhow!(
-                        "pbkdf2 iterations out of range: {}, allowed {}..={}",
-                        iterations,
-                        min_iters,
-                        MAX_PBKDF2_ITERATIONS
-                    )
-                );
+                return Err(anyhow!(
+                    "pbkdf2 iterations out of range: {}, allowed {}..={}",
+                    iterations,
+                    min_iters,
+                    MAX_PBKDF2_ITERATIONS
+                ));
             }
             // 用 PBKDF2 算法派生密钥，写入 out_key
             pbkdf2_hmac::<Sha256>(password, salt, iterations, out_key);
@@ -1391,7 +1409,11 @@ fn derive_key_into(
         }
         // 如果是 Argon2id 算法（需启用 argon2 特性）
         #[cfg(feature = "argon2")]
-        KdfKind::Argon2id { t_cost, m_cost_kib, parallelism } => {
+        KdfKind::Argon2id {
+            t_cost,
+            m_cost_kib,
+            parallelism,
+        } => {
             // 调用 Argon2id 派生密钥函数
             derive_key_argon2id(password, salt, t_cost, m_cost_kib, parallelism, out_key)
         }
@@ -1402,7 +1424,11 @@ fn derive_key_into(
 #[cfg(windows)]
 fn set_windows_attrs(target: &Path) -> Result<()> {
     // 将目标路径转换为以 0 结尾的 UTF-16 编码（Windows API 需要）
-    let dst_w: Vec<u16> = target.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let dst_w: Vec<u16> = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         // 获取当前文件属性
@@ -1441,7 +1467,7 @@ fn derive_key_argon2id(
     t_cost: u32,
     m_cost_kib: u32,
     parallelism: u32,
-    out32: &mut [u8; 32]
+    out32: &mut [u8; 32],
 ) -> Result<()> {
     // 检查迭代次数是否在允许范围内（1~10）
     if !(1..=10).contains(&t_cost) {
@@ -1456,13 +1482,14 @@ fn derive_key_argon2id(
         return Err(anyhow!("argon2 parallelism out of range"));
     }
     // 构造 Argon2 参数对象
-    let params = Params::new(m_cost_kib, t_cost, parallelism, Some(32)).map_err(|_|
-        anyhow!("argon2 params invalid")
-    )?;
+    let params = Params::new(m_cost_kib, t_cost, parallelism, Some(32))
+        .map_err(|_| anyhow!("argon2 params invalid"))?;
     // 创建 Argon2id 算法实例
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     // 用 Argon2id 算法派生密钥，写入 out32
-    argon2.hash_password_into(password, salt, out32).map_err(|_| anyhow!("argon2 derive failed"))
+    argon2
+        .hash_password_into(password, salt, out32)
+        .map_err(|_| anyhow!("argon2 derive failed"))
 }
 
 #[cfg(feature = "argon2")]
@@ -1500,14 +1527,17 @@ fn parse_argon2_params_from_kdf(kdf: &str) -> Result<(u32, u32)> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use std::{ env, str::FromStr };
+    use std::{env, str::FromStr};
 
     /// 生成一个唯一的临时文件路径，用于测试时避免文件名冲突
     fn test_temp_path(prefix: &str) -> PathBuf {
         // 1. 获取系统的临时目录（如 Windows 下是 C:\Users\用户名\AppData\Local\Temp）
         let mut p = env::temp_dir();
         // 2. 获取当前时间戳（单位：纳秒），这样每次生成的文件名都不会重复
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         // 3. 拼接文件名：前缀_时间戳.json，例如 ark_wallet_test_1234567890.json
         p.push(format!("{prefix}_{ts}.json"));
         // 4. 返回完整的临时文件路径
@@ -1530,7 +1560,7 @@ mod tests {
     fn test_from_secret_key_and_sign() -> anyhow::Result<()> {
         // 用指定的私钥字符串创建 SecretKey 对象
         let sk = SecretKey::from_str(
-            "E9873D79C6D87DC0FB6A5778633389F4453213303DA61F20BD67FC233AA33262"
+            "E9873D79C6D87DC0FB6A5778633389F4453213303DA61F20BD67FC233AA33262",
         )?;
         // 用 SecretKey 创建钱包实例
         let w = Wallet::from_secret_key(sk)?;
@@ -1590,7 +1620,10 @@ mod tests {
         // 用密码加载文件，得到最后保存的钱包
         let loaded = Wallet::load_encrypted(&path, pwd)?;
         // 检查加载出来的钱包私钥是否等于第二个钱包（说明覆盖成功）
-        assert_eq!(loaded.secret_key.secret_bytes(), w2.secret_key.secret_bytes());
+        assert_eq!(
+            loaded.secret_key.secret_bytes(),
+            w2.secret_key.secret_bytes()
+        );
         // 删除临时文件，清理测试环境
         let _ = fs::remove_file(&path);
         Ok(())
@@ -1621,12 +1654,12 @@ mod tests {
             .map_err(|_| anyhow!("manual v1 encrypt failed"))?;
         // 构造 v1 版本的加密钱包结构体
         let enc = EncryptedWallet {
-            magic: Some(WALLET_MAGIC.into()), // 魔法字串
-            version: 1, // v1 版本
-            kdf: "PBKDF2-SHA256".into(), // KDF 算法
-            iterations: PBKDF2_ITERATIONS, // 迭代次数
-            salt_hex: hex::encode(salt), // 盐（16进制字符串）
-            nonce_hex: hex::encode(nonce), // 随机数（16进制字符串）
+            magic: Some(WALLET_MAGIC.into()),        // 魔法字串
+            version: 1,                              // v1 版本
+            kdf: "PBKDF2-SHA256".into(),             // KDF 算法
+            iterations: PBKDF2_ITERATIONS,           // 迭代次数
+            salt_hex: hex::encode(salt),             // 盐（16进制字符串）
+            nonce_hex: hex::encode(nonce),           // 随机数（16进制字符串）
             ciphertext_hex: hex::encode(ciphertext), // 密文（16进制字符串）
         };
         // 序列化为 JSON 数据
@@ -1634,16 +1667,14 @@ mod tests {
         // 生成一个唯一的临时文件路径
         let path = test_temp_path("ark_wallet_legacy_v1");
         // 在临时目录下创建唯一的临时文件
-        let (mut f, tmp) = create_temp_exclusive(
-            path.parent().unwrap_or(Path::new(".")),
-            "wallet.json"
-        )?;
+        let (mut f, tmp) =
+            create_temp_exclusive(path.parent().unwrap_or(Path::new(".")), "wallet.json")?;
         // 写入加密钱包数据到临时文件
         f.write_all(&data).context("write legacy v1 wallet file")?;
         // 强制同步到磁盘
         f.sync_all().context("fsync legacy v1 wallet file")?;
         drop(f); // 关闭文件
-        // 用密码加载并解密钱包
+                 // 用密码加载并解密钱包
         let loaded_wallet = Wallet::load_encrypted(&tmp, password)?;
         // 检查解密出来的钱包私钥是否和原钱包一致
         assert_eq!(
@@ -1712,7 +1743,7 @@ mod tests {
         // 设置文件大小为钱包允许的最大值 + 1 字节（超出限制）
         f.set_len(super::MAX_WALLET_FILE_SIZE + 1)?;
         drop(f); // 关闭文件句柄
-        // 尝试加载这个超大文件，应该返回错误
+                 // 尝试加载这个超大文件，应该返回错误
         let err = Wallet::load_encrypted(&path, b"aaaaaaaa").unwrap_err();
         // 检查错误信息中包含 "too large"
         assert!(format!("{err}").contains("too large"));
@@ -1754,14 +1785,16 @@ mod tests {
         let pwd = b"a_very_strong_password";
         // 生成真实钱包目录的临时路径
         let mut real_dir = env::temp_dir();
-        real_dir.push(
-            format!("ark_wallet_real_{}", SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())
-        );
+        real_dir.push(format!(
+            "ark_wallet_real_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
         // 生成符号链接目录的临时路径
         let mut link_dir = env::temp_dir();
-        link_dir.push(
-            format!("ark_wallet_link_{}", SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos())
-        );
+        link_dir.push(format!(
+            "ark_wallet_link_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
         // 创建真实钱包目录
         fs::create_dir_all(&real_dir)?;
         // 创建一个指向真实钱包目录的符号链接目录
@@ -1840,7 +1873,8 @@ mod tests {
         // 读取加密钱包文件内容并反序列化为 EncryptedWallet 结构体
         let mut enc: EncryptedWallet = serde_json::from_slice(&read_wallet_file_secure(&path)?)?;
         // 人为截断 nonce 字段，模拟 nonce 长度不合法的情况
-        enc.nonce_hex.truncate(enc.nonce_hex.len().saturating_sub(2));
+        enc.nonce_hex
+            .truncate(enc.nonce_hex.len().saturating_sub(2));
         // 把被截断的加密钱包重新写回文件
         fs::write(&path, serde_json::to_vec_pretty(&enc)?)?;
         // 尝试用密码解密被截断 nonce 的钱包，应该返回 nonce 或长度相关的错误
@@ -1882,7 +1916,7 @@ mod tests {
     #[test]
     fn test_mnemonic_generation_and_key_recovery() -> anyhow::Result<()> {
         // 导入生成助记词和通过助记词恢复私钥的函数
-        use super::{ generate_mnemonic, secret_key_from_mnemonic };
+        use super::{generate_mnemonic, secret_key_from_mnemonic};
 
         // 生成一个新的助记词（12个英文单词）
         let phrase = generate_mnemonic()?;
@@ -1899,7 +1933,7 @@ mod tests {
 
 #[cfg(feature = "hd")]
 // 导入 bip39 助记词库的 Mnemonic 和 Language 类型
-use bip39::{ Language, Mnemonic };
+use bip39::{Language, Mnemonic};
 
 /// 生成新的助记词（12个英文单词）
 #[cfg(feature = "hd")]
@@ -1921,7 +1955,7 @@ pub fn secret_key_from_mnemonic(mnemonic_phrase: &str) -> anyhow::Result<secp256
     // 通过助记词生成种子（BIP39 标准，默认无密码）
     let seed = mnemonic.to_seed_normalized("");
     let seed_bytes = &seed[..]; // 获取种子字节切片
-    // 用种子前 32 字节生成 secp256k1 私钥
+                                // 用种子前 32 字节生成 secp256k1 私钥
     let secret_key = secp256k1::SecretKey::from_slice(&seed_bytes[0..32])?;
     // 返回私钥对象
     Ok(secret_key)
@@ -1937,13 +1971,11 @@ impl Wallet {
     /// 通过助记词和语言生成钱包，自动校验助记词合法性
     pub fn from_mnemonic_with_lang(phrase: &str, lang: Language) -> anyhow::Result<Self> {
         // 校验助记词合法性
-        let mnemonic = Mnemonic::parse_in_normalized(lang, phrase).map_err(|e|
-            anyhow!("invalid mnemonic: {e}")
-        )?;
+        let mnemonic = Mnemonic::parse_in_normalized(lang, phrase)
+            .map_err(|e| anyhow!("invalid mnemonic: {e}"))?;
         let seed = mnemonic.to_seed_normalized("");
         let seed_bytes = &seed[..];
-        let sk = secp256k1::SecretKey
-            ::from_slice(&seed_bytes[0..32])
+        let sk = secp256k1::SecretKey::from_slice(&seed_bytes[0..32])
             .map_err(|e| anyhow!("invalid secret key from mnemonic: {e}"))?;
         Wallet::from_secret_key(sk)
     }
@@ -1952,9 +1984,8 @@ impl Wallet {
     pub fn generate_mnemonic_with_lang(lang: Language) -> anyhow::Result<String> {
         let mut entropy = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut entropy);
-        let mnemonic = Mnemonic::from_entropy_in(lang, &entropy).map_err(|e|
-            anyhow!("mnemonic generation failed: {e}")
-        )?;
+        let mnemonic = Mnemonic::from_entropy_in(lang, &entropy)
+            .map_err(|e| anyhow!("mnemonic generation failed: {e}"))?;
         Ok(mnemonic.to_string())
     }
 
@@ -1963,33 +1994,32 @@ impl Wallet {
         phrase: &str,
         lang: Language,
         passphrase: &str,
-        derivation_path: &str
+        derivation_path: &str,
     ) -> anyhow::Result<Self> {
-        use bip32::{ DerivationPath, XPrv }; // 精简导入，去掉 Mnemonic/Prefix
+        use bip32::{DerivationPath, XPrv}; // 精简导入，去掉 Mnemonic/Prefix
 
         // 校验助记词合法性（bip39）
-        let mnemonic = Mnemonic::parse_in_normalized(lang, phrase).map_err(|e|
-            anyhow!("invalid mnemonic: {e}")
-        )?;
+        let mnemonic = Mnemonic::parse_in_normalized(lang, phrase)
+            .map_err(|e| anyhow!("invalid mnemonic: {e}"))?;
         // 生成 BIP39 种子（支持 passphrase）
         let seed = mnemonic.to_seed_normalized(passphrase);
 
         // 用种子创建主扩展私钥（bip32）
         let xprv = XPrv::new(seed).map_err(|e| anyhow!("bip32 xprv error: {e}"))?;
         // 解析派生路径
-        let path = DerivationPath::from_str(derivation_path).map_err(|e|
-            anyhow!("invalid derivation path: {e}")
-        )?;
+        let path = DerivationPath::from_str(derivation_path)
+            .map_err(|e| anyhow!("invalid derivation path: {e}"))?;
         // 按路径逐级派生子扩展私钥（bip32 0.5）
         let mut cur = xprv;
         for c in path.into_iter() {
-            cur = cur.derive_child(c).map_err(|e| anyhow!("bip32 derive error: {e}"))?;
+            cur = cur
+                .derive_child(c)
+                .map_err(|e| anyhow!("bip32 derive error: {e}"))?;
         }
         let child_xprv = cur;
         // 取子私钥 32 字节
         let sk_bytes = child_xprv.private_key().to_bytes();
-        let sk = secp256k1::SecretKey
-            ::from_slice(&sk_bytes)
+        let sk = secp256k1::SecretKey::from_slice(&sk_bytes)
             .map_err(|e| anyhow!("invalid secret key from bip32: {e}"))?;
         Wallet::from_secret_key(sk)
     }

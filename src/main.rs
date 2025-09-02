@@ -1,7 +1,7 @@
-use clap::{ Parser, Subcommand, ValueEnum };
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[cfg(feature = "backup")]
-use std::io::{ self, Read }; // 非交互场景从 stdin 读密码时用
+use std::io::{self, Read}; // 非交互场景从 stdin 读密码时用
 
 #[derive(Parser)]
 #[command(name = "ark_protocol", about = "Ark Protocol CLI", version)]
@@ -35,7 +35,7 @@ impl From<CliLang> for bip39::Language {
 // backup 子命令交互读取密码时再引入 inquire
 #[cfg(feature = "backup")]
 fn read_password_interactive(prompt: &str) -> anyhow::Result<String> {
-    use inquire::{ Password, PasswordDisplayMode };
+    use inquire::{Password, PasswordDisplayMode};
     let ans = Password::new(prompt)
         .with_display_toggle_enabled()
         .with_display_mode(PasswordDisplayMode::Masked)
@@ -146,12 +146,17 @@ fn main() -> anyhow::Result<()> {
             }
         }
         #[cfg(feature = "hd")]
-        Commands::Recover { phrase, lang, passphrase, path } => {
+        Commands::Recover {
+            phrase,
+            lang,
+            passphrase,
+            path,
+        } => {
             let w = ark_protocol::wallet::Wallet::from_mnemonic_with_path(
                 &phrase,
                 lang.into(),
                 &passphrase,
-                &path
+                &path,
             )?;
             if cli.json {
                 println!(
@@ -166,7 +171,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
         #[cfg(feature = "backup")]
-        Commands::SaveEncrypted { file, password, password_prompt, password_stdin } => {
+        Commands::SaveEncrypted {
+            file,
+            password,
+            password_prompt,
+            password_stdin,
+        } => {
             let pwd = obtain_password(password, password_prompt, password_stdin, "Set password")?;
             let w = ark_protocol::wallet::Wallet::new()?;
             w.save_encrypted(&file, pwd.as_bytes())?;
@@ -177,7 +187,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
         #[cfg(feature = "backup")]
-        Commands::LoadEncrypted { file, password, password_prompt, password_stdin } => {
+        Commands::LoadEncrypted {
+            file,
+            password,
+            password_prompt,
+            password_stdin,
+        } => {
             let pwd = obtain_password(password, password_prompt, password_stdin, "Enter password")?;
             let w = ark_protocol::wallet::Wallet::load_encrypted(&file, pwd.as_bytes())?;
             if cli.json {
@@ -202,7 +217,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
         #[cfg(feature = "backup")]
-        Commands::BackupCleanup { dir, base, keep_last } => {
+        Commands::BackupCleanup {
+            dir,
+            base,
+            keep_last,
+        } => {
             let n = ark_protocol::wallet::cleanup_backups(&dir, &base, keep_last)?;
             if cli.json {
                 println!("{}", serde_json::json!({ "removed": n }));
@@ -219,7 +238,7 @@ fn obtain_password(
     pwd_opt: Option<String>,
     prompt: bool,
     stdin_flag: bool,
-    title: &str
+    title: &str,
 ) -> anyhow::Result<String> {
     if let Some(p) = pwd_opt {
         return Ok(p);
