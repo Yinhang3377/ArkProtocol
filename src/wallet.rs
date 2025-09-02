@@ -140,12 +140,33 @@ fn validate_base_name(base: &str) -> Result<()> {
     Ok(())
 }
 
-// 可选：内存加锁模块（memlock）
-// 作用：在钱包加密/解密等敏感操作时，尝试将内存缓冲区锁定在物理内存中，防止被操作系统交换到磁盘（swap/pagefile），提升私钥等敏感数据的安全性。
-// 仅在启用 feature = "memlock" 时生效，不同平台有不同实现，失败时不会影响主流程。
-
 #[cfg(feature = "memlock")]
 mod memlock {
+    #[cfg(unix)]
+    pub fn lock(buf: &mut [u8]) -> std::io::Result<()> {
+        // 使用 mlock 锁定内存，防止被交换到磁盘
+        unsafe {
+            let ret = libc::mlock(buf.as_ptr() as *const _, buf.len());
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    pub fn unlock(buf: &mut [u8]) -> std::io::Result<()> {
+        unsafe {
+            let ret = libc::munlock(buf.as_ptr() as *const _, buf.len());
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        }
+    }
+
     #[cfg(windows)]
     pub fn lock(buf: &mut [u8]) -> std::io::Result<()> {
         use windows::Win32::System::Memory::VirtualLock;
